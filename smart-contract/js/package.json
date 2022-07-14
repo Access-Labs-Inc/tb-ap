@@ -1,9 +1,10 @@
 {
-  "name": "@access-protocol/js",
+  "name": "@theblockcrypto/ap",
   "version": "0.2.1",
   "license": "MIT",
   "repository": {
-    "type": "git"
+    "type": "git",
+    "url": "https://github.com/TheBlockCrypto/ap.git"
   },
   "publishConfig": {
     "access": "public"
