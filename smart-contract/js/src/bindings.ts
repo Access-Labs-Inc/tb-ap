@@ -37,8 +37,8 @@ import {
   Token,
   ASSOCIATED_TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
-import { TokenMetadataProgram } from '@metaplex-foundation/js/dist/esm/programs/tokenMetadata/TokenMetadataProgram.mjs';
-import { findMetadataPda } from '@metaplex-foundation/js/dist/esm/programs/tokenMetadata/pdas/findMetadataPda.mjs';
+import { TokenMetadataProgram } from '@metaplex-foundation/js/dist/cjs/programs/tokenMetadata/TokenMetadataProgram.cjs';
+import { findMetadataPda } from '@metaplex-foundation/js/dist/cjs/programs/tokenMetadata/pdas/findMetadataPda.cjs';
 
 // TODO Change
 export const ACCESS_PROGRAM_ID = new PublicKey(
