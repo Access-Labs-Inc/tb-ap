@@ -31,6 +31,8 @@ pub enum AccessError {
     WrongSplTokenProgramId,
     #[error("Source token account must be owned by SPL Token")]
     WrongTokenAccountOwner,
+    #[error("Bond account must be owned by the program")]
+    WrongBondAccountOwner,
     #[error("Stake account must be program owned")]
     WrongStakeAccountOwner,
     #[error("Stake pool account must be program owned")]
@@ -71,8 +73,12 @@ pub enum AccessError {
     UnclaimedRewards,
     #[error("Unstake period not over")]
     CannotUnstake,
+    #[error("Invalid unstake amount")]
+    InvalidUnstakeAmount,
     #[error("Inactive stake pool not allowed")]
     InactiveStakePoolNotAllowed,
+    #[error("Active stake pool not allowed")]
+    ActiveStakePoolNotAllowed,
     #[error("Invalid tag change")]
     InvalidTagChange,
     #[error("Too many unstake requests")]

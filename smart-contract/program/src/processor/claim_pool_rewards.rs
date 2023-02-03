@@ -2,21 +2,23 @@
 //! This instruction is used by stake pool owner for claiming their staking rewards
 use crate::error::AccessError;
 use crate::state::{CentralState, StakePool, Tag};
-use crate::utils::{calc_reward_fp32, check_account_key, check_account_owner, check_signer};
+use crate::utils::{
+    assert_no_close_or_delegate, calc_reward_fp32, check_account_key, check_account_owner,
+    check_signer,
+};
 use bonfida_utils::fp_math::safe_downcast;
 use bonfida_utils::{BorshSize, InstructionsAccount};
 use borsh::{BorshDeserialize, BorshSerialize};
 use solana_program::program::invoke_signed;
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
-    clock::Clock,
     entrypoint::ProgramResult,
     msg,
     program_error::ProgramError,
+    program_pack::Pack,
     pubkey::Pubkey,
-    sysvar::Sysvar,
 };
-use spl_token::instruction::mint_to;
+use spl_token::{instruction::mint_to, state::Account};
 
 #[derive(BorshDeserialize, BorshSerialize, BorshSize)]
 /// The required parameters for the `claim_pool_rewards` instruction
@@ -84,9 +86,6 @@ impl<'a, 'b: 'a> Accounts<'a, AccountInfo<'b>> {
         check_account_owner(accounts.central_state, program_id, AccessError::WrongOwner)?;
         check_account_owner(accounts.mint, &spl_token::ID, AccessError::WrongOwner)?;
 
-        // Check signer
-        check_signer(accounts.owner, AccessError::StakePoolOwnerMustSign)?;
-
         Ok(accounts)
     }
 }
@@ -98,10 +97,22 @@ pub fn process_claim_pool_rewards(
 ) -> ProgramResult {
     let accounts = Accounts::parse(accounts, program_id)?;
 
-    let current_time = Clock::get()?.unix_timestamp;
-
     let central_state = CentralState::from_account_info(accounts.central_state)?;
     let mut stake_pool = StakePool::get_checked(accounts.stake_pool, vec![Tag::StakePool])?;
+
+    let destination_token_acc = Account::unpack(&accounts.rewards_destination.data.borrow())?;
+
+    if destination_token_acc.mint != central_state.token_mint {
+        return Err(AccessError::WrongMint.into());
+    }
+
+    msg!("Account owner: {}", destination_token_acc.owner);
+    if destination_token_acc.owner.to_bytes() != stake_pool.header.owner {
+        // If the destination does not belong to the stake pool owner he must sign
+        check_signer(accounts.owner, AccessError::StakePoolOwnerMustSign)?;
+    } else {
+        assert_no_close_or_delegate(&destination_token_acc)?;
+    }
 
     // Safety checks
     check_account_key(
@@ -115,16 +126,16 @@ pub fn process_claim_pool_rewards(
         AccessError::WrongMint,
     )?;
 
-    let reward = safe_downcast(
+    let reward =
         calc_reward_fp32(
-            current_time,
-            stake_pool.header.last_claimed_time,
+            central_state.last_snapshot_offset,
+            stake_pool.header.last_claimed_offset,
             &stake_pool,
             false,
             false,
-        )? >> 32,
-    )
-    .ok_or(AccessError::Overflow)?;
+        )?;
+
+    let reward = safe_downcast(((reward >> 31) + 1) >> 1).ok_or(AccessError::Overflow)?;
 
     msg!("Claiming pool rewards {}", reward);
 
@@ -149,7 +160,7 @@ pub fn process_claim_pool_rewards(
     )?;
 
     // Update stake pool state
-    stake_pool.header.last_claimed_time = current_time;
+    stake_pool.header.last_claimed_offset = central_state.last_snapshot_offset;
 
     Ok(())
 }

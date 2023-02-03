@@ -7,27 +7,23 @@ import {
   Transaction,
 } from "@solana/web3.js";
 import * as path from "path";
-import { readFileSync } from "fs";
-import { ChildProcess, spawn, execSync } from "child_process";
+import { readFileSync, writeSync, closeSync } from "fs";
+import { execSync } from "child_process";
 import tmp from "tmp";
-import { Token, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { getOrCreateAssociatedTokenAccount, createMint, mintTo, TOKEN_PROGRAM_ID, AuthorityType, createSetAuthorityInstruction } from "@solana/spl-token";
+import { createCreateMetadataAccountV2Instruction } from '@metaplex-foundation/mpl-token-metadata';
+import { findMetadataPda } from '@metaplex-foundation/js';
+import { sleep } from "../src/utils";
 
 const programName = "access_protocol";
 
-// Spawns a local solana test validator. Caller is responsible for killing the
-// process.
-export async function spawnLocalSolana(): Promise<ChildProcess> {
-  const ledger = tmp.dirSync();
-  return spawn("solana-test-validator", ["-l", ledger.name]);
-}
-
 // Returns a keypair and key file name.
 export function initializePayer(): [Keypair, string] {
-  const name = "wallet.json";
-  const currentWallet = Keypair.fromSecretKey(
-    new Uint8Array(JSON.parse(readFileSync(name, "utf-8")))
-  );
-  return [currentWallet, name];
+  const key = new Keypair();
+  const tmpobj = tmp.fileSync();
+  writeSync(tmpobj.fd, JSON.stringify(Array.from(key.secretKey)));
+  closeSync(tmpobj.fd);
+  return [key, tmpobj.name];
 }
 
 // Deploys the agnostic order book program. Fees are paid with the fee payer
@@ -73,7 +69,7 @@ export function deployProgram(
       stakingSo,
       "--program-id",
       keyfile,
-      "-u https://api.devnet.solana.com",
+      "-u localhost",
       "-k",
       payerKeyFile,
       "--commitment finalized",
@@ -88,7 +84,7 @@ export async function airdropPayer(connection: Connection, key: PublicKey) {
     try {
       const signature = await connection.requestAirdrop(
         key,
-        2 * LAMPORTS_PER_SOL
+        10 * LAMPORTS_PER_SOL
       );
       console.log(`Airdrop signature ${signature}`);
       await connection.confirmTransaction(signature, "finalized");
@@ -106,45 +102,172 @@ export const signAndSendTransactionInstructions = async (
   connection: Connection,
   signers: Array<Keypair> | undefined,
   feePayer: Keypair,
-  txInstructions: Array<TransactionInstruction>
+  txInstructions: Array<TransactionInstruction>,
+  skipPreflight?: boolean
 ): Promise<string> => {
   const tx = new Transaction();
   tx.feePayer = feePayer.publicKey;
+  console.log("Fee payer: ", feePayer.publicKey.toBase58());
   signers = signers ? [...signers, feePayer] : [];
   tx.add(...txInstructions);
   const sig = await connection.sendTransaction(tx, signers, {
-    skipPreflight: false,
+    skipPreflight: skipPreflight ?? false,
   });
-  await connection.confirmTransaction(sig, "finalized");
+
+  // Why? https://github.com/solana-labs/solana/issues/25955
+  try {
+    await connection.confirmTransaction(sig, "finalized");
+  } catch (e) {
+    let status = await connection.getSignatureStatus(sig);
+    console.log("Signature status: ", status.value?.confirmationStatus);
+    let attempt = 1;
+    while (status.value?.confirmationStatus !== 'finalized' && attempt < 5) {
+      sleep(1000);
+      console.log(`waiting for confirmation... (${attempt})`);
+      status = await connection.getSignatureStatus(sig);
+      attempt++;
+    }
+  }
   return sig;
 };
 
 export class TokenMint {
-  constructor(public token: Token, public signer: Keypair) {}
+  token: Keypair;
+  connection: Connection;
+  feePayer: Keypair;
+  mintAuthority: PublicKey;
+  centralStateAuthority?: Keypair;
+
+  constructor(token: Keypair, connection: Connection, feePayer: Keypair, mintAuthority: PublicKey) { 
+    this.token = token;
+    this.connection = connection;
+    this.feePayer = feePayer;
+    this.mintAuthority = mintAuthority;
+  }
+
+  async updateAuthorityToCentralState(
+    connection: Connection,
+    mintAuthorityKeypair: Keypair,
+    feePayer: Keypair,
+    centralKey: PublicKey
+  ) {
+    const txs = [
+      createSetAuthorityInstruction(
+        this.token.publicKey,
+        this.mintAuthority,
+        AuthorityType.MintTokens,
+        centralKey,
+      )
+    ];
+
+    let tx = await signAndSendTransactionInstructions(connection, [mintAuthorityKeypair], feePayer, 
+      txs
+    );
+    console.log(`Move mint authority to central key ${tx}`);
+  }
+
+  async createMetadata(
+    connection: Connection,
+    feePayer: Keypair,
+    mintAuthorityKeypair: Keypair,
+    centralKey: PublicKey,
+    name: string, symbol: string, uri: string
+  ) {
+    const metadataPDA = await findMetadataPda(this.token.publicKey);
+
+    const tx_instructions = [
+      createCreateMetadataAccountV2Instruction({
+        metadata: metadataPDA,
+        mint: this.token.publicKey,
+        mintAuthority: this.mintAuthority,
+        payer: this.feePayer.publicKey,
+        updateAuthority: centralKey,
+      },
+      { createMetadataAccountArgsV2: 
+        { 
+          data: {
+            name: name, 
+            symbol: symbol,
+            uri: uri,
+            sellerFeeBasisPoints: 0,
+            creators: null,
+            collection: null,
+            uses: null
+          }, 
+          isMutable: true 
+        } 
+      })
+    ]; 
+
+    if (mintAuthorityKeypair) {
+      let tx = await signAndSendTransactionInstructions(connection, [mintAuthorityKeypair], feePayer, 
+        tx_instructions
+      );
+      console.log(`Created metadata ${tx}`);
+    } else {
+      console.log("Skipping metadata... ");
+    }
+  }
 
   static async init(
     connection: Connection,
     feePayer: Keypair,
-    mintAuthority: PublicKey | null = null
+    mintAuthority: Keypair | null = null,
+    centralKey: PublicKey,
   ) {
-    let signer = new Keypair();
-    let token = await Token.createMint(
+    let tokenKeypair = new Keypair();
+    await createMint(
       connection,
       feePayer,
-      mintAuthority || signer.publicKey,
+      mintAuthority?.publicKey ?? tokenKeypair.publicKey,
       null,
       6,
-      TOKEN_PROGRAM_ID
+      tokenKeypair
     );
-    return new TokenMint(token, signer);
+    const token = new TokenMint(
+      tokenKeypair, connection, feePayer, mintAuthority?.publicKey ?? tokenKeypair.publicKey,
+    );
+    if (mintAuthority) {
+      await token.createMetadata(
+        connection,
+        feePayer,
+        mintAuthority,
+        centralKey,
+        'Access Protocol',
+        'ACS',
+        'https://accessprotocol.com',
+      );
+      await token.updateAuthorityToCentralState(
+        connection,
+        mintAuthority,
+        feePayer,
+        centralKey
+      )
+    }
+    return token;
   }
 
   async getAssociatedTokenAccount(wallet: PublicKey): Promise<PublicKey> {
-    let acc = await this.token.getOrCreateAssociatedAccountInfo(wallet);
+    let acc = await getOrCreateAssociatedTokenAccount(
+      this.connection,
+      this.feePayer,
+      this.token.publicKey,
+      wallet
+    );
     return acc.address;
   }
 
-  async mintInto(tokenAccount: PublicKey, amount: number): Promise<void> {
-    return this.token.mintTo(tokenAccount, this.signer, [], amount);
+  async mintInto(tokenAccount: PublicKey, amount: number): Promise<any> {
+    return await mintTo(
+      this.connection, 
+      this.feePayer,
+      this.token.publicKey,
+      tokenAccount,
+      this.token,
+      amount,
+      [],
+      { skipPreflight: false },
+      TOKEN_PROGRAM_ID
+    );
   }
 }

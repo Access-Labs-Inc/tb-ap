@@ -11,7 +11,6 @@
 3. Smart contract
    - Program
    - Javascript bindings
-4. Frontend
 
 <h2 align="center">Concepts</h2>
 
@@ -39,10 +38,20 @@ The `program` folder contains the Solana smart contract code, documentation can 
 cargo doc
 ```
 
-Functional test can be ran using Solana program test
+`functional.rs` test can be run using Solana program test
 
 ```
-cargo test-bpf --features days-to-sec-10s no-mint-check no-bond-signer
+BPF_OUT_DIR=target/deploy cargo test-bpf --features days-to-sec-10s no-mint-check no-bond-signer --test functional
+```
+
+Other Rust tests can be run using
+
+```
+BPF_OUT_DIR=target/deploy cargo test-bpf --features no-mint-check no-bond-signer -- --skip functional_10s
+```
+
+```
+
 ```
 
 ### JS
@@ -60,26 +69,20 @@ yarn add @access-protocol/js
 End to end tests are implemented using `jest`, they can be run using
 
 ```
+yarn amman:start
 yarn jest
 ```
 
 This will:
 
-- Spawn a local solana test validator
+- Spawn a local solana test validator via Amman
 - Deploy the program
 - Run all the instructions of the protocol
 - Verify the states of each account at each step
 
-<h2 align="center">Frontend</h2>
+### Known shortcomings
 
-The frontend folder contains a demonstration web app that implements the following features:
-
-- Create a stake pool
-- Create a stake account
-- Stake ACCESS tokens
-- Unstake ACCESS tokens
-- Create a bond
-- Claim a bond
-- Sign a bond
-- Claim rewards for: stake pools, stake accounts and bonds
-- Unlock bond tokens
+- Cannot create two bonds tied to a different pool with the same amount
+- Bond functionality is counterintuitive
+  - Bond unlocking does not start at `unlock_start_date`, but at `unlock_start_date + unlock_period`
+  - If bond is claimed after the `unlock_start_date`, the offset of unlock times is counted relative to this date instead of the `unlock_start_date`

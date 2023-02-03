@@ -1,5 +1,4 @@
 import {
-  createCentralState,
   createStakeAccount,
   createStakePool,
   stake,
@@ -13,14 +12,16 @@ import {
   Keypair,
   PublicKey,
   TransactionInstruction,
+  LAMPORTS_PER_SOL
 } from "@solana/web3.js";
-import { CentralState, StakePool, StakeAccount } from "../src/state";
+import { StakePool, StakeAccount } from "../src/state";
 import { TokenMint } from "./utils";
-import { airdropPayer, signAndSendTransactionInstructions } from "./utils";
+import { signAndSendTransactionInstructions, airdropPayer } from "./utils";
 import {
-  Token,
   TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction,
 } from "@solana/spl-token";
 import { sleep } from "../src/utils";
 import { expect } from "@jest/globals";
@@ -28,118 +29,77 @@ import { expect } from "@jest/globals";
 export const poc = async (
   connection: Connection,
   programId: PublicKey,
-  feePayer: Keypair
+  feePayer: Keypair,
+  centralStateAuthority: Keypair,
+  accessToken: TokenMint,
 ) => {
   /**
    * Test variables
    */
-  const [centralKey, centralNonce] = await CentralState.getKey(programId);
   const decimals = Math.pow(10, 6);
-  let dailyInflation = 1_000_000 * decimals;
-  const centralStateAuthority = Keypair.generate();
-  const accessToken = await TokenMint.init(connection, feePayer, centralKey);
-  const quoteToken = await TokenMint.init(connection, feePayer);
   const stakePoolOwner = Keypair.generate();
   const Bob = Keypair.generate();
   const Alice = Keypair.generate();
   let minimumStakeAmount = 10_000 * decimals;
-  const bondAmount = 5_000_000 * decimals;
-  const bondSeller = Keypair.generate();
-  let fees = 0; // Fees collected by the central state
-  let FEES = 1 / 100; // % of fees collected on each stake
-
-  await airdropPayer(connection, bondSeller.publicKey);
 
   /**
    * Set up ATA
    */
 
-  const stakePoolAta = await Token.getAssociatedTokenAddress(
-    ASSOCIATED_TOKEN_PROGRAM_ID,
-    TOKEN_PROGRAM_ID,
+  await airdropPayer(connection, feePayer.publicKey);
+
+  const stakePoolAta = await getAssociatedTokenAddress(
     accessToken.token.publicKey,
-    stakePoolOwner.publicKey
+    stakePoolOwner.publicKey,
+    true,
+    TOKEN_PROGRAM_ID,
+    ASSOCIATED_TOKEN_PROGRAM_ID,
   );
   await signAndSendTransactionInstructions(connection, [], feePayer, [
-    Token.createAssociatedTokenAccountInstruction(
-      ASSOCIATED_TOKEN_PROGRAM_ID,
-      TOKEN_PROGRAM_ID,
-      accessToken.token.publicKey,
+    createAssociatedTokenAccountInstruction(
+      feePayer.publicKey,
       stakePoolAta,
       stakePoolOwner.publicKey,
-      feePayer.publicKey
+      accessToken.token.publicKey,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID,
     ),
   ]);
 
-  const bobAta = await Token.getAssociatedTokenAddress(
-    ASSOCIATED_TOKEN_PROGRAM_ID,
-    TOKEN_PROGRAM_ID,
+  const bobAta = await getAssociatedTokenAddress(
     accessToken.token.publicKey,
-    Bob.publicKey
+    Bob.publicKey,
+    true,
+    TOKEN_PROGRAM_ID,
+    ASSOCIATED_TOKEN_PROGRAM_ID,
   );
   await signAndSendTransactionInstructions(connection, [], feePayer, [
-    Token.createAssociatedTokenAccountInstruction(
-      ASSOCIATED_TOKEN_PROGRAM_ID,
-      TOKEN_PROGRAM_ID,
-      accessToken.token.publicKey,
+    createAssociatedTokenAccountInstruction(
+      feePayer.publicKey,
       bobAta,
       Bob.publicKey,
-      feePayer.publicKey
+      accessToken.token.publicKey,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID,
     ),
   ]);
-  const aliceAta = await Token.getAssociatedTokenAddress(
-    ASSOCIATED_TOKEN_PROGRAM_ID,
-    TOKEN_PROGRAM_ID,
+  const aliceAta = await getAssociatedTokenAddress(
     accessToken.token.publicKey,
-    Alice.publicKey
+    Alice.publicKey,
+    true,
+    TOKEN_PROGRAM_ID,
+    ASSOCIATED_TOKEN_PROGRAM_ID,
   );
   await signAndSendTransactionInstructions(connection, [], feePayer, [
-    Token.createAssociatedTokenAccountInstruction(
-      ASSOCIATED_TOKEN_PROGRAM_ID,
-      TOKEN_PROGRAM_ID,
-      accessToken.token.publicKey,
+    createAssociatedTokenAccountInstruction(
+      feePayer.publicKey,
       aliceAta,
       Alice.publicKey,
-      feePayer.publicKey
-    ),
-  ]);
-
-  const feesAta = await Token.getAssociatedTokenAddress(
-    ASSOCIATED_TOKEN_PROGRAM_ID,
-    TOKEN_PROGRAM_ID,
-    accessToken.token.publicKey,
-    centralStateAuthority.publicKey
-  );
-  await signAndSendTransactionInstructions(connection, [], feePayer, [
-    Token.createAssociatedTokenAccountInstruction(
-      ASSOCIATED_TOKEN_PROGRAM_ID,
-      TOKEN_PROGRAM_ID,
       accessToken.token.publicKey,
-      feesAta,
-      centralStateAuthority.publicKey,
-      feePayer.publicKey
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID,
     ),
   ]);
-
-  /**
-   * Create central state
-   */
-
-  const ix_central_state = await createCentralState(
-    dailyInflation,
-    centralStateAuthority.publicKey,
-    feePayer.publicKey,
-    accessToken.token.publicKey,
-    "name",
-    "symbol",
-    "uri",
-    programId
-  );
-
-  let tx = await signAndSendTransactionInstructions(connection, [], feePayer, [
-    ix_central_state,
-  ]);
-  console.log(`Created centrale state ${tx}`);
 
   /**
    * Create stake pool
@@ -147,13 +107,6 @@ export const poc = async (
   const [stakePoolKey] = await StakePool.getKey(
     programId,
     stakePoolOwner.publicKey
-  );
-  const vault = await Token.getAssociatedTokenAddress(
-    ASSOCIATED_TOKEN_PROGRAM_ID,
-    TOKEN_PROGRAM_ID,
-    accessToken.token.publicKey,
-    stakePoolKey,
-    true
   );
   const ix_stake_pool = await createStakePool(
     connection,
@@ -163,7 +116,7 @@ export const poc = async (
     programId
   );
 
-  tx = await signAndSendTransactionInstructions(
+  let tx = await signAndSendTransactionInstructions(
     connection,
     [],
     feePayer,
@@ -228,11 +181,13 @@ export const poc = async (
    * Stake
    */
 
+  let crank_ix = await crank(stakePoolKey, programId);
   tx = await signAndSendTransactionInstructions(
     connection,
     [Alice, Bob],
     feePayer,
     [
+      crank_ix,
       await stake(
         connection,
         aliceStakeKey,
@@ -246,6 +201,9 @@ export const poc = async (
 
   console.log(tx);
 
+  const balance = await connection.getBalance(feePayer.publicKey);
+  console.log("Balance", balance / LAMPORTS_PER_SOL);
+
   /**
    * - Crank
    * - Bob claims
@@ -255,11 +213,6 @@ export const poc = async (
   let bobAcc = await connection.getParsedAccountInfo(bobAta);
   let aliceAcc = await connection.getParsedAccountInfo(aliceAta);
 
-  // @ts-expect-error
-  const bobBefore = bobAcc.value.data.parsed.info.tokenAmount.uiAmount;
-  // @ts-expect-error
-  const aliceBefore = aliceAcc.value.data.parsed.info.tokenAmount.uiAmount;
-
   for (let i = 0; i < 5; i++) {
     await sleep(10_500);
     const ixs: TransactionInstruction[] = [];
@@ -267,14 +220,14 @@ export const poc = async (
 
     ixs.push(
       await crank(stakePoolKey, programId),
-      await claimRewards(connection, bobStakeKey, bobAta, programId)
+      await claimRewards(connection, bobStakeKey, bobAta, programId, true)
     );
 
     if (i === 4) {
       console.log("Alice claiming");
       signers.push(Alice);
       ixs.push(
-        await claimRewards(connection, aliceStakeKey, aliceAta, programId)
+        await claimRewards(connection, aliceStakeKey, aliceAta, programId, true)
       );
     }
 
@@ -282,7 +235,7 @@ export const poc = async (
       connection,
       signers,
       feePayer,
-      ixs
+      ixs,
     );
   }
   console.log(`All claimed ${tx}`);

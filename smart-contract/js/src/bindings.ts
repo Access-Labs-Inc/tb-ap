@@ -17,7 +17,6 @@ import {
   unlockBondTokensInstruction,
   unstakeInstruction,
   adminMintInstruction,
-  executeUnstakeInstruction,
   activateStakePoolInstruction,
   adminFreezeInstruction,
   changePoolMultiplierInstruction,
@@ -35,16 +34,20 @@ import { CentralState, StakePool, BondAccount, StakeAccount } from "./state";
 import BN from "bn.js";
 import {
   TOKEN_PROGRAM_ID,
-  Token,
   ASSOCIATED_TOKEN_PROGRAM_ID,
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction, getImmutableOwner,
 } from "@solana/spl-token";
-import { TokenMetadataProgram } from '@metaplex-foundation/js/dist/cjs/programs/tokenMetadata/TokenMetadataProgram.cjs';
-import { findMetadataPda } from '@metaplex-foundation/js/dist/cjs/programs/tokenMetadata/pdas/findMetadataPda.cjs';
+
 
 // TODO Change
 export const ACCESS_PROGRAM_ID = new PublicKey(
   "2ZsWiVGXzL4kgMDtSfeEJSV27fBnMptrdcNKKZygUoB8"
 );
+import { TokenMetadataProgram } from '@metaplex-foundation/js/dist/cjs/programs/tokenMetadata/TokenMetadataProgram.cjs';
+import { findMetadataPda } from '@metaplex-foundation/js/dist/cjs/programs/tokenMetadata/pdas/findMetadataPda.cjs';
+import {u64} from "./u64";
+import {getBondAccounts} from "./secondary_bindings";
 
 /**
  * This function can be used to update the inflation schedule of the central state
@@ -128,7 +131,8 @@ export const claimBondRewards = async (
   connection: Connection,
   bondAccount: PublicKey,
   rewardsDestination: PublicKey,
-  programId: PublicKey
+  programId: PublicKey,
+  ownerMustSign = true
 ) => {
   const [centralKey] = await CentralState.getKey(programId);
   const centralState = await CentralState.retrieve(connection, centralKey);
@@ -145,6 +149,11 @@ export const claimBondRewards = async (
     centralState.tokenMint,
     TOKEN_PROGRAM_ID
   );
+
+  if (!ownerMustSign) {
+    const idx = ix.keys.findIndex((e) => e.pubkey.equals(bond.owner));
+    ix.keys[idx].isSigner = false;
+  }
 
   return ix;
 };
@@ -197,7 +206,8 @@ export const claimPoolRewards = async (
   connection: Connection,
   stakePoolAccount: PublicKey,
   rewardsDestination: PublicKey,
-  programId: PublicKey
+  programId: PublicKey,
+  ownerMustSign = true
 ) => {
   const [centralKey] = await CentralState.getKey(programId);
   const centralState = await CentralState.retrieve(connection, centralKey);
@@ -212,6 +222,11 @@ export const claimPoolRewards = async (
     centralState.tokenMint,
     TOKEN_PROGRAM_ID
   );
+
+  if (!ownerMustSign) {
+    const idx = ix.keys.findIndex((e) => e.pubkey.equals(stakePool.owner));
+    ix.keys[idx].isSigner = false;
+  }
 
   return ix;
 };
@@ -229,7 +244,8 @@ export const claimRewards = async (
   stakeAccount: PublicKey,
   rewardsDestination: PublicKey,
   programId: PublicKey,
-  allowZeroRewards: boolean
+  allowZeroRewards: boolean,
+  ownerMustSign = true
 ) => {
   const stake = await StakeAccount.retrieve(connection, stakeAccount);
   const [centralKey] = await CentralState.getKey(programId);
@@ -247,6 +263,11 @@ export const claimRewards = async (
     centralState.tokenMint,
     TOKEN_PROGRAM_ID
   );
+
+  if (!ownerMustSign) {
+    const idx = ix.keys.findIndex((e) => e.pubkey.equals(stake.owner));
+    ix.keys[idx].isSigner = false;
+  }
 
   return ix;
 };
@@ -394,30 +415,19 @@ export const createCentralState = async (
   authority: PublicKey,
   feePayer: PublicKey,
   mint: PublicKey,
-  name: string,
-  symbol: string,
-  uri: string,
   programId: PublicKey,
-  tokenMetataProgramId = TokenMetadataProgram.publicKey
 ) => {
   const [centralKey] = await CentralState.getKey(programId);
-  const metadata = findMetadataPda(mint, tokenMetataProgramId);
 
   const ix = new createCentralStateInstruction({
     dailyInflation: new BN(dailyInflation),
     authority: authority.toBuffer(),
-    name,
-    symbol,
-    uri,
   }).getInstruction(
     programId,
     centralKey,
     SystemProgram.programId,
     feePayer,
     mint,
-    metadata,
-    TokenMetadataProgram.publicKey,
-    SYSVAR_RENT_PUBKEY
   );
 
   return ix;
@@ -478,21 +488,21 @@ export const createStakePool = async (
   const [stakePool] = await StakePool.getKey(programId, owner);
   const [centralKey] = await CentralState.getKey(programId);
   const centralState = await CentralState.retrieve(connection, centralKey);
-  const vault = await Token.getAssociatedTokenAddress(
-    ASSOCIATED_TOKEN_PROGRAM_ID,
-    TOKEN_PROGRAM_ID,
+  const vault = await getAssociatedTokenAddress(
     centralState.tokenMint,
     stakePool,
-    true
+    true,
+    TOKEN_PROGRAM_ID,
+    ASSOCIATED_TOKEN_PROGRAM_ID,
   );
 
-  const createVaultIx = Token.createAssociatedTokenAccountInstruction(
-    ASSOCIATED_TOKEN_PROGRAM_ID,
-    TOKEN_PROGRAM_ID,
-    centralState.tokenMint,
+  const createVaultIx = createAssociatedTokenAccountInstruction(
+    feePayer,
     vault,
     stakePool,
-    feePayer
+    centralState.tokenMint,
+    TOKEN_PROGRAM_ID,
+    ASSOCIATED_TOKEN_PROGRAM_ID,
   );
 
   const ix = new createStakePoolInstruction({
@@ -532,7 +542,7 @@ export const signBond = async (
 
 /**
  * This instruction can be used by stakers to deposit ACCESS tokens in their stake account.
- * The staking fee (1%) will be deducted additionaly to the `amount` from the source account.
+ * The staking fee (2%) will be deducted additionaly to the `amount` from the source account.
  * @param connection The Solana RPC connection
  * @param stakeAccount The key of the stake account
  * @param sourceToken The token account from which the ACCESS tokens are sent to the stake account
@@ -551,15 +561,24 @@ export const stake = async (
   const stakePool = await StakePool.retrieve(connection, stake.stakePool);
   const [centralKey] = await CentralState.getKey(programId);
   const centralState = await CentralState.retrieve(connection, centralKey);
+  const bondAccounts = await getBondAccounts(connection, stake.owner, programId);
+  let bondAccountKey: PublicKey | undefined;
+  if (bondAccounts.length > 0) {
+    bondAccountKey = bondAccounts[0].pubkey;
+  }
 
-  const feesAta = await Token.getAssociatedTokenAddress(
-    ASSOCIATED_TOKEN_PROGRAM_ID,
-    TOKEN_PROGRAM_ID,
+
+  const feesAta = await getAssociatedTokenAddress(
     centralState.tokenMint,
-    centralState.authority
+    centralState.authority,
+    true,
+    TOKEN_PROGRAM_ID,
+    ASSOCIATED_TOKEN_PROGRAM_ID,
   );
 
-  const ix = new stakeInstruction({ amount: new BN(amount) }).getInstruction(
+  const ix = new stakeInstruction({
+    amount: new BN(amount),
+  }).getInstruction(
     programId,
     centralKey,
     stakeAccount,
@@ -568,7 +587,8 @@ export const stake = async (
     sourceToken,
     TOKEN_PROGRAM_ID,
     stakePool.vault,
-    feesAta
+    feesAta,
+    bondAccountKey,
   );
 
   return ix;
@@ -612,6 +632,7 @@ export const unlockBondTokens = async (
  * This instruction can be used to request an unstake of ACCESS tokens
  * @param connection The Solana RPC connection
  * @param stakeAccount The key of the stake account
+ * @param destinationToken The token account receiving the ACCESS tokens
  * @param amount The amount of tokens to unstake
  * @param programId The ACCESS program ID
  * @returns
@@ -619,50 +640,31 @@ export const unlockBondTokens = async (
 export const unstake = async (
   connection: Connection,
   stakeAccount: PublicKey,
+  destinationToken: PublicKey,
   amount: number,
   programId: PublicKey
 ) => {
   const stake = await StakeAccount.retrieve(connection, stakeAccount);
+  const stakePool = await StakePool.retrieve(connection, stake.stakePool);
   const [centralKey] = await CentralState.getKey(programId);
+  const bondAccounts = await getBondAccounts(connection, stake.owner, programId);
+  let bondAccountKey: PublicKey | undefined;
+  if (bondAccounts.length > 0) {
+    bondAccountKey = bondAccounts[0].pubkey;
+  }
 
   const ix = new unstakeInstruction({
-    amount: new BN(amount),
+    amount: new BN(amount)
   }).getInstruction(
     programId,
     centralKey,
     stakeAccount,
     stake.stakePool,
-    stake.owner
-  );
-
-  return ix;
-};
-
-/**
- * This instruction can be used to execute an unstake of ACCESS tokens
- * @param connection The Solana RPC connection
- * @param stakeAccount The key of the stake account
- * @param destinationToken The token account receiving the ACCESS tokens
- * @param programId The ACCESS program ID
- * @returns
- */
-export const executeUnstake = async (
-  connection: Connection,
-  stakeAccount: PublicKey,
-  destinationToken: PublicKey,
-  programId: PublicKey
-) => {
-  const stake = await StakeAccount.retrieve(connection, stakeAccount);
-  const stakePool = await StakePool.retrieve(connection, stake.stakePool);
-
-  const ix = new executeUnstakeInstruction().getInstruction(
-    programId,
-    stakeAccount,
-    stake.stakePool,
     stake.owner,
     destinationToken,
     TOKEN_PROGRAM_ID,
-    stakePool.vault
+    stakePool.vault,
+    bondAccountKey
   );
 
   return ix;
