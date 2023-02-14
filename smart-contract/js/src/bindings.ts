@@ -28,7 +28,6 @@ import {
   PublicKey,
   SystemProgram,
   SYSVAR_RENT_PUBKEY,
-  TransactionInstruction
 } from "@solana/web3.js";
 import { CentralState, StakePool, BondAccount, StakeAccount } from "./state";
 import BN from "bn.js";
@@ -38,14 +37,7 @@ import {
   getAssociatedTokenAddress,
   createAssociatedTokenAccountInstruction, getImmutableOwner,
 } from "@solana/spl-token";
-
-
-// TODO Change
-export const ACCESS_PROGRAM_ID = new PublicKey(
-  "2ZsWiVGXzL4kgMDtSfeEJSV27fBnMptrdcNKKZygUoB8"
-);
-import { TokenMetadataProgram } from '@metaplex-foundation/js/dist/cjs/programs/tokenMetadata/TokenMetadataProgram.cjs';
-import { findMetadataPda } from '@metaplex-foundation/js/dist/cjs/programs/tokenMetadata/pdas/findMetadataPda.cjs';
+import { findMetadataPda, TokenMetadataProgram } from "@metaplex-foundation/js";
 import {u64} from "./u64";
 import {getBondAccounts} from "./secondary_bindings";
 
@@ -562,11 +554,12 @@ export const stake = async (
   const [centralKey] = await CentralState.getKey(programId);
   const centralState = await CentralState.retrieve(connection, centralKey);
   const bondAccounts = await getBondAccounts(connection, stake.owner, programId);
-  let bondAccountKey: PublicKey | undefined;
-  if (bondAccounts.length > 0) {
-    bondAccountKey = bondAccounts[0].pubkey;
-  }
 
+  const bondAccountKey = bondAccounts.find(
+    bond =>
+      BondAccount.deserialize(bond.account.data).stakePool.toBase58() ===
+      stake.stakePool.toBase58(),
+  )?.pubkey;
 
   const feesAta = await getAssociatedTokenAddress(
     centralState.tokenMint,
@@ -648,10 +641,11 @@ export const unstake = async (
   const stakePool = await StakePool.retrieve(connection, stake.stakePool);
   const [centralKey] = await CentralState.getKey(programId);
   const bondAccounts = await getBondAccounts(connection, stake.owner, programId);
-  let bondAccountKey: PublicKey | undefined;
-  if (bondAccounts.length > 0) {
-    bondAccountKey = bondAccounts[0].pubkey;
-  }
+  const bondAccountKey = bondAccounts.find(
+    bond =>
+      BondAccount.deserialize(bond.account.data).stakePool.toBase58() ===
+      stake.stakePool.toBase58(),
+  )?.pubkey;
 
   const ix = new unstakeInstruction({
     amount: new BN(amount)
